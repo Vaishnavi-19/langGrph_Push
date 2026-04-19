@@ -59,3 +59,109 @@ START → chatbot ⇄ tools
 | `gradio` | Chat UI |
 | `python-dotenv` | Environment variable loading |
 | `requests` | Pushover HTTP calls |
+
+---
+
+## LangGraph Framework
+
+LangGraph is a library from LangChain for building **stateful, multi-step AI agents** as directed graphs. Each node is a function; edges define the flow of control.
+
+### Core Concepts
+
+#### 1. State
+The **State** is a shared data structure (TypedDict) passed between every node. Each node reads from it and returns updates to it.
+
+```python
+class State(TypedDict):
+    messages: Annotated[list, add_messages]  # 'add_messages' is the reducer
+```
+
+#### 2. Nodes
+A **node** is simply a Python function that receives the current `State` and returns a partial update.
+
+```python
+def chatbot(state: State):
+    return {"messages": [llm.invoke(state["messages"])]}
+```
+
+#### 3. Edges
+
+| Edge Type | Description |
+|---|---|
+| `add_edge(A, B)` | Always go from A → B |
+| `add_conditional_edges(A, fn)` | Route based on output of `fn(state)` |
+| `START` | Special entry point node |
+| `END` | Special terminal node |
+
+#### 4. Reducers
+A **reducer** controls *how* new values are merged into existing state — instead of overwriting. `add_messages` appends new messages rather than replacing the list.
+
+```python
+messages: Annotated[list, add_messages]
+#                         ^^^^^^^^^^^
+#                         reducer function
+```
+
+Without a reducer, each node update would overwrite the field entirely.
+
+#### 5. ToolNode & tools_condition
+- **`ToolNode`** — a built-in node that automatically executes whichever tool the LLM called
+- **`tools_condition`** — a built-in conditional function that routes to `tools` if the LLM produced a tool call, otherwise routes to `END`
+
+#### 6. Checkpointer / Memory
+A **checkpointer** (e.g. `MemorySaver`) persists state between invocations, enabling multi-turn memory keyed by `thread_id`.
+
+---
+
+### Graph Architecture
+
+```mermaid
+flowchart TD
+    START([START]) --> chatbot
+
+    chatbot["🤖 chatbot node\n(LLM + bound tools)"]
+    tools["🔧 tools node\n(ToolNode)"]
+    END([END])
+
+    chatbot -- "tools_condition:\ntool call detected" --> tools
+    chatbot -- "tools_condition:\nno tool call" --> END
+    tools -- "always" --> chatbot
+```
+
+---
+
+### State Flow Diagram
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Graph
+    participant Chatbot Node
+    participant Tools Node
+    participant MemorySaver
+
+    User->>Graph: invoke({"messages": [user_msg]}, config)
+    Graph->>MemorySaver: load state for thread_id
+    MemorySaver-->>Graph: existing State
+    Graph->>Chatbot Node: State
+    Chatbot Node-->>Graph: {"messages": [AIMessage + tool_call]}
+    Graph->>Tools Node: State (reducer appended new message)
+    Tools Node-->>Graph: {"messages": [ToolMessage]}
+    Graph->>Chatbot Node: State (reducer appended tool result)
+    Chatbot Node-->>Graph: {"messages": [final AIMessage]}
+    Graph->>MemorySaver: persist updated State
+    Graph-->>User: result["messages"][-1].content
+```
+
+---
+
+### How This Project Maps to These Concepts
+
+| Concept | This Project |
+|---|---|
+| State | `messages` list with `add_messages` reducer |
+| Chatbot node | `gpt-4o-mini` with search + push tools bound |
+| Tools node | `ToolNode([tool_search, tool_push])` |
+| Conditional edge | `tools_condition` routes LLM → tools or END |
+| Checkpointer | `MemorySaver` keyed by `thread_id = "1"` |
+| Entry point | `add_edge(START, "chatbot")` |
